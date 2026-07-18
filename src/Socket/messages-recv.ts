@@ -34,6 +34,7 @@ import {
 	getNextPreKeys,
 	getStatusFromReceiptType,
 	hkdf,
+	invalidateGroupSenderKeyMemoryForIdentities,
 	MISSING_KEYS_ERROR_TEXT,
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
@@ -83,6 +84,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		sendReceipt,
 		uploadPreKeys,
 		sendPeerDataOperationMessage,
+		getUSyncDevices,
+		userDevicesCache,
 		messageRetryManager
 	} = sock
 
@@ -108,6 +111,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			stdTTL: DEFAULT_CACHE_TTLS.MSG_RETRY, // 1 hour
 			useClones: false
 		})
+	const participantHashRetryCache = new NodeCache<boolean>({
+		stdTTL: 10 * 60,
+		useClones: false
+	})
 
 	// Debounce identity-change session refreshes per JID to avoid bursts
 	const identityAssertDebounce = new NodeCache<boolean>({ stdTTL: 5, useClones: false })
@@ -535,6 +542,78 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}, authState?.creds?.me?.id || 'sendRetryRequest')
 	}
 
+	const resolveIdentityAliases = async (from: string) => {
+		const normalizedFrom = jidNormalizedUser(from)
+		const aliases = [normalizedFrom]
+
+		try {
+			const mappedIdentity = isPnUser(normalizedFrom)
+				? await signalRepository.lidMapping.getLIDForPN(normalizedFrom)
+				: isLidUser(normalizedFrom)
+					? await signalRepository.lidMapping.getPNForLID(normalizedFrom)
+					: null
+
+			if (mappedIdentity) {
+				aliases.push(jidNormalizedUser(mappedIdentity))
+			}
+		} catch (error) {
+			logger.warn({ err: error, jid: from }, 'failed to resolve identity aliases')
+		}
+
+		return [...new Set(aliases)]
+	}
+
+	const invalidateIdentitySenderKeys = async (from: string, aliases: string[]) => {
+		try {
+			const groups = await sock.groupFetchAllParticipating()
+			return await invalidateGroupSenderKeyMemoryForIdentities(authState.keys, Object.keys(groups), aliases)
+		} catch (error) {
+			logger.warn({ err: error, jid: from }, 'failed to invalidate group sender-key memory after identity change')
+			return { groupsChecked: 0, groupsUpdated: 0, deviceEntriesRemoved: 0 }
+		}
+	}
+
+	const refreshIdentitySessions = async (from: string, aliases: string[]) => {
+		if (identityAssertDebounce.get(jidNormalizedUser(from))) {
+			logger.debug({ jid: from }, 'skipping identity session refresh (debounced)')
+			return 0
+		}
+
+		try {
+			for (const alias of aliases) {
+				const user = jidDecode(alias)?.user
+				if (user) {
+					await userDevicesCache.del(user)
+				}
+			}
+
+			const devices = await getUSyncDevices(aliases, false, false)
+			const sessionTargets = devices.length ? devices.map(device => device.jid) : aliases
+			await assertSessions(sessionTargets, true)
+			identityAssertDebounce.set(jidNormalizedUser(from), true)
+			return sessionTargets.length
+		} catch (error) {
+			logger.warn({ err: error, jid: from }, 'failed to refresh sessions after identity change')
+			return 0
+		}
+	}
+
+	const processIdentityChange = async (from: string) => {
+		logger.info({ jid: from }, 'identity changed')
+		const aliases = await resolveIdentityAliases(from)
+		const [invalidation, refreshedSessions] = await Promise.all([
+			invalidateIdentitySenderKeys(from, aliases),
+			refreshIdentitySessions(from, aliases)
+		])
+
+		ev.emit('identity-change', {
+			jid: jidNormalizedUser(from),
+			aliases,
+			...invalidation,
+			refreshedSessions
+		})
+	}
+
 	const handleEncryptNotification = async (node: BinaryNode) => {
 		const from = node.attrs.from
 		if (from === S_WHATSAPP_NET) {
@@ -546,25 +625,21 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			if (shouldUploadMorePreKeys) {
 				await uploadPreKeys()
 			}
-		} else {
-			const identityNode = getBinaryNodeChild(node, 'identity')
-			if (identityNode) {
-				logger.info({ jid: from }, 'identity changed')
-				if (identityAssertDebounce.get(from!)) {
-					logger.debug({ jid: from }, 'skipping identity assert (debounced)')
-					return
-				}
 
-				identityAssertDebounce.set(from!, true)
-				try {
-					await assertSessions([from!], true)
-				} catch (error) {
-					logger.warn({ error, jid: from }, 'failed to assert sessions after identity change')
-				}
-			} else {
-				logger.info({ node }, 'unknown encrypt notification')
-			}
+			return
 		}
+
+		if (!getBinaryNodeChild(node, 'identity')) {
+			logger.info({ node }, 'unknown encrypt notification')
+			return
+		}
+
+		if (!from) {
+			logger.warn({ node }, 'identity change notification is missing a sender')
+			return
+		}
+
+		await processIdentityChange(from)
 	}
 
 	const handleGroupNotification = (fullNode: BinaryNode, child: BinaryNode, msg: Partial<WAMessage>) => {
@@ -1363,22 +1438,39 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		await sendMessageAck(node)
 	}
 
+	const retryGroupMessageAfterParticipantHashMismatch = async (key: WAMessageKey) => {
+		if (!key.remoteJid || !key.id || !isJidGroup(key.remoteJid)) {
+			return
+		}
+
+		const retryKey = `${key.remoteJid}:${key.id}`
+		if (participantHashRetryCache.get(retryKey)) {
+			logger.warn({ key }, 'skipping repeated participant-hash recovery')
+			return
+		}
+
+		participantHashRetryCache.set(retryKey, true)
+		const message = await getMessage(key)
+		if (!message) {
+			logger.warn({ key }, 'could not recover participant-hash mismatch because the message was not found')
+			return
+		}
+
+		const recovery = await sock.repairGroupSenderKeyDistribution(key.remoteJid)
+		logger.info({ key, recovery }, 'repaired group sender keys after participant-hash mismatch')
+		await relayMessage(key.remoteJid, message, {
+			messageId: key.id,
+			useUserDevicesCache: false,
+			useCachedGroupMetadata: false
+		})
+	}
+
 	const handleBadAck = async ({ attrs }: BinaryNode) => {
 		const key: WAMessageKey = { remoteJid: attrs.from, fromMe: true, id: attrs.id }
 
-		// WARNING: REFRAIN FROM ENABLING THIS FOR NOW. IT WILL CAUSE A LOOP
-		// // current hypothesis is that if pash is sent in the ack
-		// // it means -- the message hasn't reached all devices yet
-		// // we'll retry sending the message here
-		// if(attrs.phash) {
-		// 	logger.info({ attrs }, 'received phash in ack, resending message...')
-		// 	const msg = await getMessage(key)
-		// 	if(msg) {
-		// 		await relayMessage(key.remoteJid!, msg, { messageId: key.id!, useUserDevicesCache: false })
-		// 	} else {
-		// 		logger.warn({ attrs }, 'could not send message again, as it was not found')
-		// 	}
-		// }
+		if (attrs.phash) {
+			await retryGroupMessageAfterParticipantHashMismatch(key)
+		}
 
 		// error in acknowledgement,
 		// device could not display the message
