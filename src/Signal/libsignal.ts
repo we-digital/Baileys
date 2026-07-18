@@ -20,6 +20,47 @@ import { SenderKeyRecord } from './Group/sender-key-record'
 import { GroupCipher, GroupSessionBuilder, SenderKeyDistributionMessage } from './Group'
 import { LIDMappingStore } from './lid-mapping'
 
+const LIBSIGNAL_SESSION_LOG_REDACTION = Symbol.for('baileys.libsignal-session-log-redaction')
+
+type LibSignalSessionEntry = {
+	indexInfo: { closed: number }
+}
+
+type LibSignalSessionRecord = {
+	isClosed(session: LibSignalSessionEntry): boolean
+}
+
+type LibSignalSessionRecordPrototype = {
+	closeSession(this: LibSignalSessionRecord, session: LibSignalSessionEntry): void
+	openSession(this: LibSignalSessionRecord, session: LibSignalSessionEntry): void
+	[LIBSIGNAL_SESSION_LOG_REDACTION]?: boolean
+}
+/**
+ * libsignal-node logs the entire SessionEntry when opening or closing a
+ * session. That object contains key material and must never be written to
+ * application logs. Preserve the state transition without the sensitive dump.
+ */
+export const installLibSignalSessionLogRedaction = () => {
+	const prototype = libsignal.SessionRecord.prototype as unknown as LibSignalSessionRecordPrototype
+	if (prototype[LIBSIGNAL_SESSION_LOG_REDACTION]) {
+		return
+	}
+
+	prototype.closeSession = function (session) {
+		if (!this.isClosed(session)) {
+			session.indexInfo.closed = Date.now()
+		}
+	}
+
+	prototype.openSession = function (session) {
+		session.indexInfo.closed = -1
+	}
+
+	Object.defineProperty(prototype, LIBSIGNAL_SESSION_LOG_REDACTION, { value: true })
+}
+
+installLibSignalSessionLogRedaction()
+
 export function makeLibSignalRepository(
 	auth: SignalAuthState,
 	logger: ILogger,
