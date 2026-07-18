@@ -21,6 +21,8 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
 - A server `phash` mismatch triggers at most one full repair and resend per message
   during a 10-minute window. The bound prevents the retry loop warned about in the
   upstream stub.
+- Baileys replaces libsignal-node's session open/close logger with the same state
+  transitions without dumping SessionEntry objects and their key material.
 
 ## Verification
 
