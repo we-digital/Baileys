@@ -565,7 +565,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 	const invalidateIdentitySenderKeys = async (from: string, aliases: string[]) => {
 		try {
-			const groups = await sock.groupFetchAllParticipating()
+			// Recovery only needs the group IDs. Emitting groups.update here makes
+			// consumers refresh metadata for every group and can trigger a large
+			// WhatsApp rate-limit burst during reconnect/identity rotation.
+			const groups = await sock.groupFetchAllParticipating(false)
 			return await invalidateGroupSenderKeyMemoryForIdentities(authState.keys, Object.keys(groups), aliases)
 		} catch (error) {
 			logger.warn({ err: error, jid: from }, 'failed to invalidate group sender-key memory after identity change')

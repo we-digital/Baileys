@@ -11,6 +11,9 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
   again with `reason=identity`.
 - Matching `sender-key-memory` entries are removed from every participating group,
   so each group redistributes its own Sender Key Distribution Message on its next send.
+- The identity scan reads participating group IDs without emitting `groups.update`;
+  this prevents consumers from issuing a metadata request for every group and hitting
+  WhatsApp rate limits during reconnect.
 - The socket emits an `identity-change` event with recovery counters for operations.
 - `repairGroupSenderKeyDistribution(groupJid)` performs an explicit full repair:
   fresh group metadata, uncached USync device enumeration, forced pairwise session
@@ -44,5 +47,6 @@ the exact upstream commits covering identity-change invalidation, PN/LID aliases
 uncached device refresh, forced session recreation, and bounded participant-hash
 recovery. Then run the acceptance test against that candidate.
 
-The production consumer is `we-digital/wdgtl-evo-api`. It pins a commit SHA from
-this fork so branch movement cannot silently alter a production build.
+The production consumer is `we-digital/wdgtl-evo-api`. It pins an immutable release
+asset plus lockfile integrity from this fork so branch movement cannot silently alter
+a production build.

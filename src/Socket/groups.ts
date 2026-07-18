@@ -34,7 +34,7 @@ export const makeGroupsSocket = (config: SocketConfig) => {
 		return extractGroupMetadata(result)
 	}
 
-	const groupFetchAllParticipating = async () => {
+	const groupFetchAllParticipating = async (emitUpdate = true) => {
 		const result = await query({
 			tag: 'iq',
 			attrs: {
@@ -68,7 +68,9 @@ export const makeGroupsSocket = (config: SocketConfig) => {
 		}
 
 		// TODO: properly parse LID / PN DATA
-		sock.ev.emit('groups.update', Object.values(data))
+		if (emitUpdate) {
+			sock.ev.emit('groups.update', Object.values(data))
+		}
 
 		return data
 	}
