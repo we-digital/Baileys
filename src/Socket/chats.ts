@@ -89,6 +89,16 @@ export const makeChatsSocket = (config: SocketConfig) => {
 		config.placeholderResendCache = placeholderResendCache
 	}
 
+	ev.on('lid-mapping.update', async ({ lid, pn }) => {
+		try {
+			if ((await signalRepository.lidMapping.getPNForLID(lid)) !== pn) {
+				await signalRepository.lidMapping.storeLIDPNMappings([{ lid, pn }])
+			}
+		} catch (error) {
+			logger.warn({ lid, pn, error }, 'failed to store LID-PN mapping update')
+		}
+	})
+
 	/** helper function to fetch the given app state sync key */
 	const getAppStateSyncKey = async (keyId: string) => {
 		const { [keyId]: key } = await authState.keys.get('app-state-sync-key', [keyId])

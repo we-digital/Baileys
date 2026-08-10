@@ -1,9 +1,10 @@
 import { promisify } from 'util'
 import { inflate } from 'zlib'
 import { proto } from '../../WAProto/index.js'
-import type { Chat, Contact, WAMessage } from '../Types'
+import type { Chat, Contact, LIDMapping, WAMessage } from '../Types'
 import { WAMessageStubType } from '../Types'
 import { toNumber } from './generics'
+import { toLidPnMapping } from './lid-mapping-events'
 import { normalizeMessageContent } from './messages'
 import { downloadContentFromMessage } from './messages-media'
 
@@ -29,6 +30,13 @@ export const processHistoryMessage = (item: proto.IHistorySync) => {
 	const messages: WAMessage[] = []
 	const contacts: Contact[] = []
 	const chats: Chat[] = []
+	const lidPnMappings: LIDMapping[] = []
+	for (const mapping of item.phoneNumberToLidMappings || []) {
+		const validMapping = toLidPnMapping(mapping.lidJid, mapping.pnJid)
+		if (validMapping) {
+			lidPnMappings.push(validMapping)
+		}
+	}
 
 	switch (item.syncType) {
 		case proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP:
@@ -87,6 +95,7 @@ export const processHistoryMessage = (item: proto.IHistorySync) => {
 		chats,
 		contacts,
 		messages,
+		lidPnMappings,
 		syncType: item.syncType,
 		progress: item.progress
 	}
