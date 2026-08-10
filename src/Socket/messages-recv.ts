@@ -42,6 +42,7 @@ import {
 	xmppPreKey,
 	xmppSignedPreKey
 } from '../Utils'
+import { emitLidPnMappings, getLidPnMappingFromAlt } from '../Utils/lid-mapping-events'
 import { makeMutex } from '../Utils/make-mutex'
 import {
 	areJidsSameUser,
@@ -1271,16 +1272,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const alt = msg.key.participantAlt || msg.key.remoteJidAlt
 		// store new mappings we didn't have before
 		if (!!alt) {
-			const altServer = jidDecode(alt)?.server
 			const primaryJid = msg.key.participant || msg.key.remoteJid!
-			if (altServer === 'lid') {
-				if (!(await signalRepository.lidMapping.getPNForLID(alt))) {
-					await signalRepository.lidMapping.storeLIDPNMappings([{ lid: alt, pn: primaryJid }])
-					await signalRepository.migrateSession(primaryJid, alt)
-				}
-			} else {
-				await signalRepository.lidMapping.storeLIDPNMappings([{ lid: primaryJid, pn: alt }])
-				await signalRepository.migrateSession(alt, primaryJid)
+			const mapping = getLidPnMappingFromAlt(primaryJid, alt)
+			if (mapping && (await signalRepository.lidMapping.getPNForLID(mapping.lid)) !== mapping.pn) {
+				await signalRepository.lidMapping.storeLIDPNMappings([mapping])
+				await signalRepository.migrateSession(mapping.pn, mapping.lid)
+				emitLidPnMappings(ev, [mapping])
 			}
 		}
 

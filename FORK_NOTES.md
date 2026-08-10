@@ -23,6 +23,9 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
   upstream stub.
 - Baileys replaces libsignal-node's session open/close logger with the same state
   transitions without dumping SessionEntry objects and their key material.
+- Newly learned PN/LID pairs are emitted immediately after they are stored from
+  history sync, migration sync, message alt JIDs, or app-state contact actions.
+  Consumers can reconcile provisional identities without waiting for a daily scan.
 
 ## Verification
 

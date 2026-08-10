@@ -32,6 +32,7 @@ import {
 import { aesDecryptGCM, hmacSign } from './crypto'
 import { getKeyAuthor, toNumber } from './generics'
 import { downloadAndProcessHistorySyncNotification } from './history'
+import { emitLidPnMappings, toLidPnMapping } from './lid-mapping-events'
 import type { ILogger } from './logger'
 
 type ProcessMessageContext = {
@@ -287,6 +288,11 @@ const processMessage = async (
 
 					const data = await downloadAndProcessHistorySyncNotification(histNotification, options)
 
+					if (data.lidPnMappings.length) {
+						await signalRepository.lidMapping.storeLIDPNMappings(data.lidPnMappings)
+						emitLidPnMappings(ev, data.lidPnMappings)
+					}
+
 					ev.emit('messaging-history.set', {
 						...data,
 						isLatest: histNotification.syncType !== proto.HistorySync.HistorySyncType.ON_DEMAND ? isLatest : undefined,
@@ -387,11 +393,19 @@ const processMessage = async (
 				const pairs = []
 				for (const { pn, latestLid, assignedLid } of pnToLidMappings) {
 					const lid = latestLid || assignedLid
-					pairs.push({ lid: `${lid}@lid`, pn: `${pn}@s.whatsapp.net` })
+					if (!lid || !pn) {
+						continue
+					}
+
+					const mapping = toLidPnMapping(`${lid}@lid`, `${pn}@s.whatsapp.net`)
+					if (mapping) {
+						pairs.push(mapping)
+					}
 				}
 
 				await signalRepository.lidMapping.storeLIDPNMappings(pairs)
 				if (pairs.length) {
+					emitLidPnMappings(ev, pairs)
 					for (const { pn, lid } of pairs) {
 						await signalRepository.migrateSession(pn, lid)
 					}
