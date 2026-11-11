@@ -48,6 +48,14 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
   stored from history sync, LID migration sync, and message alt JIDs (upstream stores
   these silently). Emitted JIDs are user-level (device suffix stripped). LID migration
   sync skips entries whose LID or PN is missing or `0` instead of storing `0@lid`.
+- The two Signal LRU caches (`LIDMappingStore.mappingCache`, `migratedSessionCache`)
+  are bounded (`max: 10000`) and run without `ttlAutopurge` timers. Both hold data
+  derived from persistent keys, so eviction is only a cache miss. Until rc.9.4 this was
+  a hash-checked postinstall patch in `wdgtl-evo-api`; it now lives here.
+- A failed participant-hash repair is logged and no longer swallows the error-ack
+  `messages.update` (status ERROR) that consumers forward to Chatwoot.
+- `whatsapp-rust-bridge` is pinned to 0.5.5: 0.5.4 exports only the ESM `import`
+  condition, so CommonJS consumers such as `wdgtl-evo-api` fail at `require` time.
 
 ## Verification
 
