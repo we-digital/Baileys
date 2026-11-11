@@ -33,6 +33,7 @@ import {
 import { aesDecryptGCM, hmacSign } from './crypto'
 import { getKeyAuthor, toNumber } from './generics'
 import { downloadAndProcessHistorySyncNotification } from './history'
+import { emitLidPnMappings, toLidPnMapping } from './lid-mapping-events'
 import type { ILogger } from './logger'
 import { buildMergedTcTokenIndexWrite, resolveTcTokenJid } from './tc-token-utils'
 
@@ -400,9 +401,11 @@ const processMessage = async (
 
 					if (data.lidPnMappings?.length) {
 						logger?.debug({ count: data.lidPnMappings.length }, 'processing LID-PN mappings from history sync')
-						await signalRepository.lidMapping
-							.storeLIDPNMappings(data.lidPnMappings)
-							.catch(err => logger?.warn({ err }, 'failed to store LID-PN mappings from history sync'))
+						const lidPnMappings = data.lidPnMappings
+						await signalRepository.lidMapping.storeLIDPNMappings(lidPnMappings).then(
+							() => emitLidPnMappings(ev, lidPnMappings),
+							err => logger?.warn({ err }, 'failed to store LID-PN mappings from history sync')
+						)
 					}
 
 					await storeTcTokensFromHistorySync(data.chats, signalRepository, keyStore, logger)
@@ -548,12 +551,22 @@ const processMessage = async (
 				logger?.debug({ pnToLidMappings, chatDbMigrationTimestamp }, 'got lid mappings and chat db migration timestamp')
 				const pairs = []
 				for (const { pn, latestLid, assignedLid } of pnToLidMappings) {
-					const lid = latestLid || assignedLid
-					pairs.push({ lid: `${lid}@lid`, pn: `${pn}@s.whatsapp.net` })
+					// decoded uint64 fields default to 0 rather than undefined
+					const lidUser = String(latestLid || assignedLid || '')
+					const pnUser = String(pn || '')
+					if (!lidUser || lidUser === '0' || !pnUser || pnUser === '0') {
+						continue
+					}
+
+					const mapping = toLidPnMapping(`${lidUser}@lid`, `${pnUser}@s.whatsapp.net`)
+					if (mapping) {
+						pairs.push(mapping)
+					}
 				}
 
 				await signalRepository.lidMapping.storeLIDPNMappings(pairs)
 				if (pairs.length) {
+					emitLidPnMappings(ev, pairs)
 					for (const { pn, lid } of pairs) {
 						await signalRepository.migrateSession(pn, lid)
 					}

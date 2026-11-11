@@ -1,5 +1,6 @@
 import type { Boom } from '@hapi/boom'
 import { proto } from '../../WAProto/index.js'
+import type { IdentityChangeResult } from '../Utils/identity-change-handler'
 import type { AuthenticationCreds, LIDMapping } from './Auth'
 import type { WACallEvent } from './Call'
 import type { Chat, ChatUpdate, PresenceData } from './Chat'
@@ -106,6 +107,16 @@ export type BaileysEventMap = {
 
 	'blocklist.set': { blocklist: string[] }
 	'blocklist.update': { blocklist: string[]; type: 'add' | 'remove' }
+	/** a peer's Signal identity changed; counters describe the local sender-key recovery */
+	'identity-change': {
+		jid: string
+		aliases: string[]
+		action: IdentityChangeResult['action']
+		groupsChecked: number
+		groupsUpdated: number
+		deviceEntriesRemoved: number
+		refreshedSessions: number
+	}
 
 	/** Receive an update on a call, including when the call was received, rejected, accepted */
 	call: WACallEvent[]

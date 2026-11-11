@@ -498,6 +498,37 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		return didFetchNewSession
 	}
 
+	/**
+	 * Fully repair group sender-key distribution after device or Signal identity
+	 * drift. This deliberately bypasses the user-device cache and forces fresh
+	 * pairwise sessions before clearing the group's SKDM delivery memory.
+	 */
+	const repairGroupSenderKeyDistribution = async (jid: string) => {
+		if (!isJidGroup(jid)) {
+			throw new Boom('Group sender-key recovery requires a group JID', { statusCode: 400 })
+		}
+
+		const metadata = await groupMetadata(jid)
+		const participantJids = metadata.participants.map(participant => participant.id)
+		const devices = await getUSyncDevices(participantJids, false, false)
+		const sessionTargets = devices
+			.filter(device => !isHostedLidUser(device.jid) && !isHostedPnUser(device.jid) && device.device !== 99)
+			.map(device => device.jid)
+
+		if (sessionTargets.length) {
+			await assertSessions(sessionTargets, true)
+		}
+
+		await authState.keys.set({ 'sender-key-memory': { [jid]: null } })
+
+		return {
+			groupJid: jid,
+			participantCount: participantJids.length,
+			deviceCount: devices.length,
+			sessionCount: sessionTargets.length
+		}
+	}
+
 	const sendPeerDataOperationMessage = async (
 		pdoMessage: proto.Message.IPeerDataOperationRequestMessage
 	): Promise<string> => {
@@ -1264,6 +1295,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		devicesMutex,
 		issuePrivacyTokens,
 		assertSessions,
+		repairGroupSenderKeyDistribution,
 		relayMessage,
 		sendReceipt,
 		sendReceipts,
