@@ -2007,7 +2007,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const key: WAMessageKey = { remoteJid: attrs.from, fromMe: true, id: attrs.id }
 
 		if (attrs.phash) {
-			await retryGroupMessageAfterParticipantHashMismatch(key)
+			// A failed repair must not swallow the error-ack status update below
+			try {
+				await retryGroupMessageAfterParticipantHashMismatch(key)
+			} catch (error) {
+				logger.warn({ key, err: error }, 'participant-hash recovery failed')
+			}
 		}
 
 		// error in acknowledgement,
