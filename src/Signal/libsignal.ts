@@ -47,6 +47,74 @@ function extractIdentityFromPkmsg(ciphertext: Uint8Array): Uint8Array | undefine
 	}
 }
 
+const LIBSIGNAL_SESSION_LOG_REDACTION = Symbol.for('baileys.libsignal-session-log-redaction')
+
+// Mirrors CLOSED_SESSIONS_MAX in libsignal@6 src/session_record.js
+const LIBSIGNAL_CLOSED_SESSIONS_MAX = 40
+
+type LibSignalSessionEntry = {
+	indexInfo: { closed: number }
+}
+
+type LibSignalSessionRecord = {
+	sessions: Record<string, LibSignalSessionEntry>
+	isClosed(session: LibSignalSessionEntry): boolean
+}
+
+type LibSignalSessionRecordPrototype = {
+	closeSession(this: LibSignalSessionRecord, session: LibSignalSessionEntry): void
+	openSession(this: LibSignalSessionRecord, session: LibSignalSessionEntry): void
+	removeOldSessions(this: LibSignalSessionRecord): void
+	[LIBSIGNAL_SESSION_LOG_REDACTION]?: boolean
+}
+/**
+ * libsignal-node (still in 6.0.0) logs the entire SessionEntry when opening,
+ * closing or pruning a session. That object contains key material and must never
+ * be written to application logs. Preserve the state transitions without the dump.
+ */
+export const installLibSignalSessionLogRedaction = () => {
+	const prototype = libsignal.SessionRecord.prototype as unknown as LibSignalSessionRecordPrototype
+	if (prototype[LIBSIGNAL_SESSION_LOG_REDACTION]) {
+		return
+	}
+
+	prototype.closeSession = function (session) {
+		if (!this.isClosed(session)) {
+			session.indexInfo.closed = Date.now()
+		}
+	}
+
+	prototype.openSession = function (session) {
+		session.indexInfo.closed = -1
+	}
+
+	prototype.removeOldSessions = function () {
+		while (Object.keys(this.sessions).length > LIBSIGNAL_CLOSED_SESSIONS_MAX) {
+			let oldestKey: string | undefined
+			let oldestSession: LibSignalSessionEntry | undefined
+			for (const [key, session] of Object.entries(this.sessions)) {
+				if (
+					session.indexInfo.closed !== -1 &&
+					(!oldestSession || session.indexInfo.closed < oldestSession.indexInfo.closed)
+				) {
+					oldestKey = key
+					oldestSession = session
+				}
+			}
+
+			if (!oldestKey) {
+				throw new Error('Corrupt sessions object')
+			}
+
+			delete this.sessions[oldestKey]
+		}
+	}
+
+	Object.defineProperty(prototype, LIBSIGNAL_SESSION_LOG_REDACTION, { value: true })
+}
+
+installLibSignalSessionLogRedaction()
+
 export function makeLibSignalRepository(
 	auth: SignalAuthState,
 	logger: ILogger,
@@ -58,7 +126,8 @@ export function makeLibSignalRepository(
 	const parsedKeys = auth.keys as SignalKeyStoreWithTransaction
 	const migratedSessionCache = new LRUCache<string, true>({
 		ttl: 3 * 24 * 60 * 60 * 1000, // 7 days
-		ttlAutopurge: true,
+		max: 10000,
+		ttlAutopurge: false,
 		updateAgeOnGet: true
 	})
 

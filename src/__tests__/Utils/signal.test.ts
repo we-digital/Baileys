@@ -1,4 +1,7 @@
 import { jest } from '@jest/globals'
+/* @ts-ignore */
+import * as libsignal from 'libsignal'
+import { installLibSignalSessionLogRedaction } from '../../Signal/libsignal'
 import type { SignalRepositoryWithLIDStore } from '../../Types'
 import { parseAndInjectE2ESessions } from '../../Utils/signal'
 import type { BinaryNode } from '../../WABinary/types'
@@ -65,5 +68,52 @@ describe('parseAndInjectE2ESessions', () => {
 		expect(mockRepository.injectE2ESession).toHaveBeenCalledWith(
 			expect.objectContaining({ jid: 'user3@s.whatsapp.net' })
 		)
+	})
+})
+
+describe('installLibSignalSessionLogRedaction', () => {
+	it('preserves session state transitions without logging key material', () => {
+		type SessionEntry = { indexInfo: { closed: number } }
+		type SessionRecord = {
+			closeSession(session: SessionEntry): void
+			openSession(session: SessionEntry): void
+		}
+		type SessionRecordConstructor = {
+			new (): SessionRecord
+			createEntry(): SessionEntry
+		}
+
+		installLibSignalSessionLogRedaction()
+		const info = jest.spyOn(console, 'info').mockImplementation(() => undefined)
+		const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined)
+		const SessionRecord = libsignal.SessionRecord as unknown as SessionRecordConstructor
+		const record = new SessionRecord()
+		const session = SessionRecord.createEntry()
+		session.indexInfo = { closed: -1 }
+
+		record.closeSession(session)
+		expect(session.indexInfo.closed).toBeGreaterThan(0)
+		record.openSession(session)
+		expect(session.indexInfo.closed).toBe(-1)
+		expect(info).not.toHaveBeenCalled()
+		expect(warn).not.toHaveBeenCalled()
+
+		const pruned = new SessionRecord() as SessionRecord & {
+			sessions: Record<string, SessionEntry>
+			removeOldSessions(): void
+		}
+		for (let i = 0; i < 42; i++) {
+			pruned.sessions[`key-${i}`] = { indexInfo: { closed: i === 41 ? -1 : 1000 + i } }
+		}
+
+		pruned.removeOldSessions()
+		expect(Object.keys(pruned.sessions)).toHaveLength(40)
+		expect(pruned.sessions['key-0']).toBeUndefined()
+		expect(pruned.sessions['key-1']).toBeUndefined()
+		expect(pruned.sessions['key-41']).toBeDefined()
+		expect(info).not.toHaveBeenCalled()
+
+		info.mockRestore()
+		warn.mockRestore()
 	})
 })

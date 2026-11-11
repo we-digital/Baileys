@@ -44,6 +44,8 @@ import {
 	getStatusFromReceiptType,
 	handleIdentityChange,
 	hkdf,
+	type IdentityChangeResult,
+	invalidateGroupSenderKeyMemoryForIdentities,
 	MISSING_KEYS_ERROR_TEXT,
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
@@ -53,6 +55,7 @@ import {
 	xmppPreKey,
 	xmppSignedPreKey
 } from '../Utils'
+import { emitLidPnMappings, getLidPnMappingFromAlt } from '../Utils/lid-mapping-events'
 import { makeMutex } from '../Utils/make-mutex'
 import { makeOfflineNodeProcessor, type MessageType } from '../Utils/offline-node-processor'
 import { buildAckStanza } from '../Utils/stanza-ack'
@@ -135,7 +138,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		registerSocketEndHandler,
 		issuePrivacyTokens,
 		fetchAccountReachoutTimelock,
-		placeholderResendCache
+		placeholderResendCache,
+		getUSyncDevices
 	} = sock
 
 	const getLIDForPN = signalRepository.lidMapping.getLIDForPN.bind(signalRepository.lidMapping)
@@ -158,6 +162,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 	// Debounce identity-change session refreshes per JID to avoid bursts
 	const identityAssertDebounce = new NodeCache<boolean>({ stdTTL: 5, useClones: false })
+	// At most one participant-hash repair + resend per group message within 10 minutes
+	const participantHashRetryCache = new NodeCache<boolean>({ stdTTL: 10 * 60, useClones: false })
 
 	let sendActiveReceipts = false
 
@@ -760,6 +766,130 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		})
 	}
 
+	const resolveIdentityAliases = async (from: string) => {
+		const normalizedFrom = jidNormalizedUser(from)
+		const aliases = [normalizedFrom]
+
+		try {
+			const mappedIdentity = isPnUser(normalizedFrom)
+				? await signalRepository.lidMapping.getLIDForPN(normalizedFrom)
+				: isLidUser(normalizedFrom)
+					? await signalRepository.lidMapping.getPNForLID(normalizedFrom)
+					: null
+
+			if (mappedIdentity) {
+				aliases.push(jidNormalizedUser(mappedIdentity))
+			}
+		} catch (error) {
+			logger.warn({ err: error, jid: from }, 'failed to resolve identity aliases')
+		}
+
+		return [...new Set(aliases)]
+	}
+
+	const dropCachedIdentityDevices = async (aliases: string[]) => {
+		for (const alias of aliases) {
+			const user = jidDecode(alias)?.user
+			if (user) {
+				await userDevicesCache?.del(user)
+			}
+		}
+	}
+
+	// Offline identity-change bursts on reconnect share one participating-groups query
+	const PARTICIPATING_GROUPS_TTL_MS = 60_000
+	let participatingGroupIds: { ids: string[]; fetchedAt: number } | undefined
+	let participatingGroupIdsInFlight: Promise<string[]> | undefined
+	const getParticipatingGroupIds = async () => {
+		if (participatingGroupIds && Date.now() - participatingGroupIds.fetchedAt < PARTICIPATING_GROUPS_TTL_MS) {
+			return participatingGroupIds.ids
+		}
+
+		// Recovery only needs the group IDs. Emitting groups.update here makes
+		// consumers refresh metadata for every group and can trigger a large
+		// WhatsApp rate-limit burst during reconnect/identity rotation.
+		participatingGroupIdsInFlight ??= sock
+			.groupFetchAllParticipating(false)
+			.then(groups => {
+				const ids = Object.keys(groups)
+				participatingGroupIds = { ids, fetchedAt: Date.now() }
+				return ids
+			})
+			.finally(() => {
+				participatingGroupIdsInFlight = undefined
+			})
+
+		return participatingGroupIdsInFlight
+	}
+
+	const invalidateIdentitySenderKeys = async (from: string, aliases: string[]) => {
+		try {
+			const groupIds = await getParticipatingGroupIds()
+			return await invalidateGroupSenderKeyMemoryForIdentities(authState.keys, groupIds, aliases)
+		} catch (error) {
+			logger.warn({ err: error, jid: from }, 'failed to invalidate group sender-key memory after identity change')
+			return { groupsChecked: 0, groupsUpdated: 0, deviceEntriesRemoved: 0 }
+		}
+	}
+
+	/** handleIdentityChange outcomes after which the peer's group sender-key delivery state is stale */
+	const SENDER_KEY_INVALIDATING_ACTIONS = new Set<IdentityChangeResult['action']>([
+		'session_refreshed',
+		'session_refresh_failed',
+		'skipped_offline',
+		'skipped_no_session'
+	])
+
+	const processIdentityChangeNotification = async (node: BinaryNode) => {
+		const from = node.attrs.from
+		let aliases: string[] | undefined
+		const getAliases = async () => (aliases ??= await resolveIdentityAliases(from!))
+		let refreshedSessions = 0
+
+		const result = await handleIdentityChange(node, {
+			meId: authState.creds.me?.id,
+			meLid: authState.creds.me?.lid,
+			validateSession: signalRepository.validateSession,
+			// Upstream refreshes only the notifying JID. Refresh every device of both
+			// PN and LID aliases, enumerated without the user-device cache.
+			assertSessions: async (jids, force) => {
+				const identityAliases = [...new Set([...(await getAliases()), ...jids.map(jidNormalizedUser)])]
+				await dropCachedIdentityDevices(identityAliases)
+				const devices = await getUSyncDevices(identityAliases, false, false)
+				const sessionTargets = devices.length ? devices.map(device => device.jid) : jids
+				const didFetch = await assertSessions(sessionTargets, force)
+				refreshedSessions = sessionTargets.length
+				return didFetch
+			},
+			debounceCache: identityAssertDebounce,
+			logger,
+			onBeforeSessionRefresh: reissueTcTokenAfterIdentityChange
+		})
+
+		if (result.action === 'no_identity_node') {
+			logger.info({ node }, 'unknown encrypt notification')
+			return
+		}
+
+		if (!from || !SENDER_KEY_INVALIDATING_ACTIONS.has(result.action)) {
+			return
+		}
+
+		const identityAliases = await getAliases()
+		if (!refreshedSessions) {
+			await dropCachedIdentityDevices(identityAliases)
+		}
+
+		const invalidation = await invalidateIdentitySenderKeys(from, identityAliases)
+		ev.emit('identity-change', {
+			jid: jidNormalizedUser(from),
+			aliases: identityAliases,
+			action: result.action,
+			...invalidation,
+			refreshedSessions
+		})
+	}
+
 	const handleEncryptNotification = async (node: BinaryNode) => {
 		const from = node.attrs.from
 		if (from === S_WHATSAPP_NET) {
@@ -782,19 +912,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				}
 			}
 		} else {
-			const result = await handleIdentityChange(node, {
-				meId: authState.creds.me?.id,
-				meLid: authState.creds.me?.lid,
-				validateSession: signalRepository.validateSession,
-				assertSessions,
-				debounceCache: identityAssertDebounce,
-				logger,
-				onBeforeSessionRefresh: reissueTcTokenAfterIdentityChange
-			})
-
-			if (result.action === 'no_identity_node') {
-				logger.info({ node }, 'unknown encrypt notification')
-			}
+			await processIdentityChangeNotification(node)
 		}
 	}
 
@@ -1606,6 +1724,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			if (!!alt) {
 				const altServer = jidDecode(alt)?.server
 				const primaryJid = msg.key.participant || msg.key.remoteJid!
+				const altMapping = getLidPnMappingFromAlt(primaryJid, alt)
+				const isNewAltMapping =
+					!!altMapping &&
+					jidNormalizedUser((await signalRepository.lidMapping.getPNForLID(altMapping.lid)) || '') !== altMapping.pn
 				if (altServer === 'lid') {
 					if (!(await signalRepository.lidMapping.getPNForLID(alt))) {
 						await signalRepository.lidMapping.storeLIDPNMappings([{ lid: alt, pn: primaryJid }])
@@ -1614,6 +1736,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				} else {
 					await signalRepository.lidMapping.storeLIDPNMappings([{ lid: primaryJid, pn: alt }])
 					await signalRepository.migrateSession(alt, primaryJid)
+				}
+
+				if (altMapping && isNewAltMapping) {
+					emitLidPnMappings(ev, [altMapping])
 				}
 			}
 
@@ -1845,22 +1971,49 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 	}
 
+	/**
+	 * A phash in the ack means the server's participant list differs from the one
+	 * the message was encrypted for. Repair sender keys and resend at most once per
+	 * message per 10 minutes; the bound prevents the resend loop upstream warns about.
+	 */
+	const retryGroupMessageAfterParticipantHashMismatch = async (key: WAMessageKey) => {
+		if (!key.remoteJid || !key.id || !isJidGroup(key.remoteJid)) {
+			return
+		}
+
+		const retryKey = `${key.remoteJid}:${key.id}`
+		if (participantHashRetryCache.get(retryKey)) {
+			logger.warn({ key }, 'skipping repeated participant-hash recovery')
+			return
+		}
+
+		participantHashRetryCache.set(retryKey, true)
+		const message = await getMessage(key)
+		if (!message) {
+			logger.warn({ key }, 'could not recover participant-hash mismatch because the message was not found')
+			return
+		}
+
+		const recovery = await sock.repairGroupSenderKeyDistribution(key.remoteJid)
+		logger.info({ key, recovery }, 'repaired group sender keys after participant-hash mismatch')
+		await relayMessage(key.remoteJid, message, {
+			messageId: key.id,
+			useUserDevicesCache: false,
+			useCachedGroupMetadata: false
+		})
+	}
+
 	const handleBadAck = async ({ attrs }: BinaryNode) => {
 		const key: WAMessageKey = { remoteJid: attrs.from, fromMe: true, id: attrs.id }
 
-		// WARNING: REFRAIN FROM ENABLING THIS FOR NOW. IT WILL CAUSE A LOOP
-		// // current hypothesis is that if pash is sent in the ack
-		// // it means -- the message hasn't reached all devices yet
-		// // we'll retry sending the message here
-		// if(attrs.phash) {
-		// 	logger.info({ attrs }, 'received phash in ack, resending message...')
-		// 	const msg = await getMessage(key)
-		// 	if(msg) {
-		// 		await relayMessage(key.remoteJid!, msg, { messageId: key.id!, useUserDevicesCache: false })
-		// 	} else {
-		// 		logger.warn({ attrs }, 'could not send message again, as it was not found')
-		// 	}
-		// }
+		if (attrs.phash) {
+			// A failed repair must not swallow the error-ack status update below
+			try {
+				await retryGroupMessageAfterParticipantHashMismatch(key)
+			} catch (error) {
+				logger.warn({ key, err: error }, 'participant-hash recovery failed')
+			}
+		}
 
 		// error in acknowledgement,
 		// device could not display the message
