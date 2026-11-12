@@ -37,9 +37,21 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
 - `repairGroupSenderKeyDistribution(groupJid)` performs an explicit full repair:
   fresh group metadata, uncached USync device enumeration, forced pairwise session
   refresh, and reset of the target group's sender-key delivery memory.
-- A server `phash` mismatch triggers at most one full repair and resend per message
-  during a 10-minute window. Upstream still has this resend commented out; the bound
-  prevents the loop it warns about.
+- Group sends carry a `phash` attribute, like whatsmeow: sha256 over the sorted
+  `user.0:device@server` addresses of every participant device, our own sending device
+  included and hosted devices excluded, first 6 bytes, unpadded base64 (`2:` + 8 chars).
+  Upstream sent no group phash and cut the base64 string to 6 chars, so the server
+  answered every group ack with its own phash and the recovery below ran on every send.
+  Checked on 2026-11-12 against a live group: the computed value equals the server's,
+  and with it on the stanza the ack comes back without `phash`.
+- An ack `phash` that differs from the hash we sent triggers at most one full repair and
+  resend per message during a 10-minute window. Upstream still has this resend commented
+  out; the bound prevents the loop it warns about. An ack `phash` for a message without a
+  recorded hash (sent before a restart) only repairs, so the next send redistributes the
+  sender key; missed devices recover through retry receipts.
+- The group fan-out skips our exact sending device, as the 1:1 path already did
+  (`extractDeviceJids` compares the full `me.lid` JID with a bare user, so it never
+  filtered our own LID device). The device still counts in the `phash`.
 - libsignal 6.0.0 still dumps whole SessionEntry objects (key material) via
   `console.info`/`console.warn` in `openSession`, `closeSession` and
   `removeOldSessions`. Baileys replaces those three methods with the same state

@@ -73,11 +73,28 @@ export const unpadRandomMax16 = (e: Uint8Array | Buffer) => {
 	return new Uint8Array(t.buffer, t.byteOffset, t.length - r)
 }
 
-// code is inspired by whatsmeow
+/**
+ * Device address in whatsmeow's `JID.ADString()` form: `user.agent:device@server`.
+ * The agent is always 0 for the PN/LID/hosted servers we encode to.
+ */
+const toParticipantHashAddress = (jid: string) => {
+	const decoded = jidDecode(jid)
+	if (!decoded?.user) {
+		return jid
+	}
+
+	return `${decoded.user}.0:${decoded.device || 0}@${decoded.server}`
+}
+
+/**
+ * Participant list hash the server compares against (`phash`), same as whatsmeow's
+ * `participantListHashV2`: sha256 over the sorted device addresses, first 6 bytes,
+ * unpadded base64 (8 characters).
+ */
 export const generateParticipantHashV2 = (participants: string[]): string => {
-	participants.sort()
-	const sha256Hash = sha256(Buffer.from(participants.join(''))).toString('base64')
-	return '2:' + sha256Hash.slice(0, 6)
+	const addresses = participants.map(toParticipantHashAddress).sort()
+	const digest = sha256(Buffer.from(addresses.join('')))
+	return '2:' + digest.subarray(0, 6).toString('base64').replace(/=+$/, '')
 }
 
 export const encodeWAMessage = (message: proto.IMessage) => writeRandomPadMax16(proto.Message.encode(message).finish())
