@@ -11,6 +11,8 @@ export type OfflineNodeProcessorDeps = {
 	isWsOpen: () => boolean
 	onUnexpectedError: (error: Error, msg: string) => void
 	yieldToEventLoop: () => Promise<void>
+	/** called after each queued node was handled, successfully or not */
+	onHandled?: () => void
 }
 
 /**
@@ -46,10 +48,12 @@ export function makeOfflineNodeProcessor(
 
 				if (!nodeProcessor) {
 					deps.onUnexpectedError(new Error(`unknown offline node type: ${type}`), 'processing offline node')
+					deps.onHandled?.()
 					continue
 				}
 
 				await nodeProcessor(node).catch(err => deps.onUnexpectedError(err, `processing offline ${type}`))
+				deps.onHandled?.()
 				processedInBatch++
 
 				// Yield to event loop after processing a batch

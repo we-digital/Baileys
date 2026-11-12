@@ -68,6 +68,14 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
   `messages.update` (status ERROR) that consumers forward to Chatwoot.
 - `whatsapp-rust-bridge` is pinned to 0.5.5: 0.5.4 exports only the ESM `import`
   condition, so CommonJS consumers such as `wdgtl-evo-api` fail at `require` time.
+- Offline stanzas are requested batch after batch. After `offline_preview` the server sends
+  only as many offline stanzas as the client asks for with `offline_batch`, and nothing live
+  until the backlog is delivered (`<ib><offline/>`). Upstream asks once for 100, so a session
+  with a bigger backlog got ~100 stanzas (~45 messages plus receipts) per connection and fell
+  further behind: on 2026-11-12 instance p-yuli was ~24 hours behind and received no live
+  messages at all. `makeOfflineBatchPacer` asks for the next 100 once the previous batch is
+  handled, or after a 3 s idle gap, stops at `<ib><offline/>`, on close, once the preview
+  `count` has arrived, or after 3 requests that brought nothing.
 
 ## Verification
 
