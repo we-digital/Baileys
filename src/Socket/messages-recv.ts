@@ -58,6 +58,7 @@ import {
 } from '../Utils'
 import { emitLidPnMappings, getLidPnMappingFromAlt } from '../Utils/lid-mapping-events'
 import { makeMutex } from '../Utils/make-mutex'
+import { makeOfflineBatchPacer } from '../Utils/offline-batch-pacer'
 import { makeOfflineNodeProcessor, type MessageType } from '../Utils/offline-node-processor'
 import { buildAckStanza } from '../Utils/stanza-ack'
 import {
@@ -2121,6 +2122,24 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 	}
 
+	const offlineBatchPacer = makeOfflineBatchPacer({
+		requestBatch: count =>
+			sendNode({
+				tag: 'ib',
+				attrs: {},
+				content: [{ tag: 'offline_batch', attrs: { count: String(count) } }]
+			}),
+		isWsOpen: () => ws.isOpen,
+		logger
+	})
+
+	ws.on('CB:ib,,offline_preview', (node: BinaryNode) => {
+		const count = getBinaryNodeChild(node, 'offline_preview')?.attrs.count
+		offlineBatchPacer.start(count === undefined ? undefined : Number(count))
+	})
+	ws.on('CB:ib,,offline', () => offlineBatchPacer.finish())
+	ws.on('close', () => offlineBatchPacer.stop())
+
 	const offlineNodeProcessor = makeOfflineNodeProcessor(
 		new Map<MessageType, (node: BinaryNode) => Promise<void>>([
 			['message', handleMessage],
@@ -2131,7 +2150,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		{
 			isWsOpen: () => ws.isOpen,
 			onUnexpectedError,
-			yieldToEventLoop: () => new Promise(resolve => setImmediate(resolve))
+			yieldToEventLoop: () => new Promise(resolve => setImmediate(resolve)),
+			onHandled: () => offlineBatchPacer.onHandled()
 		}
 	)
 
@@ -2154,12 +2174,20 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			ignoreJid = !isNodeFromMe || isJidGroup(attrs.from) ? attrs.from : attrs.recipient
 		}
 
-		if (ignoreJid && ignoreJid !== S_WHATSAPP_NET && shouldIgnoreJid(ignoreJid)) {
-			await sendMessageAck(node, type === 'message' ? NACK_REASONS.UnhandledError : undefined)
-			return
+		const isOffline = !!node.attrs.offline
+		if (isOffline) {
+			// every offline stanza counts toward the requested batch, ignored ones too
+			offlineBatchPacer.onReceived()
 		}
 
-		const isOffline = !!node.attrs.offline
+		if (ignoreJid && ignoreJid !== S_WHATSAPP_NET && shouldIgnoreJid(ignoreJid)) {
+			await sendMessageAck(node, type === 'message' ? NACK_REASONS.UnhandledError : undefined)
+			if (isOffline) {
+				offlineBatchPacer.onHandled()
+			}
+
+			return
+		}
 
 		if (isOffline) {
 			offlineNodeProcessor.enqueue(type, node)

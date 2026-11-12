@@ -1003,13 +1003,9 @@ export const makeSocket = (config: SocketConfig) => {
 		void end(new Boom('Multi-device beta not joined', { statusCode: DisconnectReason.multideviceMismatch }))
 	})
 
-	ws.on('CB:ib,,offline_preview', async (node: BinaryNode) => {
+	// `offline_batch` requests are paced in messages-recv (makeOfflineBatchPacer)
+	ws.on('CB:ib,,offline_preview', (node: BinaryNode) => {
 		logger.info('offline preview received', JSON.stringify(node))
-		await sendNode({
-			tag: 'ib',
-			attrs: {},
-			content: [{ tag: 'offline_batch', attrs: { count: '100' } }]
-		})
 	})
 
 	ws.on('CB:ib,,edge_routing', (node: BinaryNode) => {
