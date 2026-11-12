@@ -49,6 +49,7 @@ import {
 	MISSING_KEYS_ERROR_TEXT,
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
+	participantHashAckAction,
 	SERVER_ERROR_CODES,
 	toNumber,
 	unixTimestampSeconds,
@@ -1972,12 +1973,22 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	}
 
 	/**
-	 * A phash in the ack means the server's participant list differs from the one
-	 * the message was encrypted for. Repair sender keys and resend at most once per
-	 * message per 10 minutes; the bound prevents the resend loop upstream warns about.
+	 * The ack carries the server's participant-list hash (`phash`) for group sends.
+	 * Only a hash that differs from the one we sent means some devices were missed:
+	 * then repair sender keys and resend, at most once per message per 10 minutes
+	 * (the bound prevents the resend loop upstream warns about). Without a recorded
+	 * hash (e.g. sent before a restart) repair only, so the next send redistributes
+	 * the sender key, and leave missed devices to their retry receipts.
 	 */
-	const retryGroupMessageAfterParticipantHashMismatch = async (key: WAMessageKey) => {
+	const retryGroupMessageAfterParticipantHashMismatch = async (key: WAMessageKey, serverHash: string) => {
 		if (!key.remoteJid || !key.id || !isJidGroup(key.remoteJid)) {
+			return
+		}
+
+		const sentHash = sock.getSentGroupParticipantHash(key.remoteJid, key.id)
+		const action = participantHashAckAction(sentHash, serverHash)
+		if (action === 'none') {
+			logger.trace({ key, phash: serverHash }, 'participant hash matches')
 			return
 		}
 
@@ -1988,6 +1999,15 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 
 		participantHashRetryCache.set(retryKey, true)
+		if (action === 'repair') {
+			const recovery = await sock.repairGroupSenderKeyDistribution(key.remoteJid)
+			logger.info(
+				{ key, serverHash, recovery },
+				'repaired group sender keys for a message without a recorded participant hash'
+			)
+			return
+		}
+
 		const message = await getMessage(key)
 		if (!message) {
 			logger.warn({ key }, 'could not recover participant-hash mismatch because the message was not found')
@@ -1995,7 +2015,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 
 		const recovery = await sock.repairGroupSenderKeyDistribution(key.remoteJid)
-		logger.info({ key, recovery }, 'repaired group sender keys after participant-hash mismatch')
+		logger.info({ key, sentHash, serverHash, recovery }, 'repaired group sender keys after participant-hash mismatch')
 		await relayMessage(key.remoteJid, message, {
 			messageId: key.id,
 			useUserDevicesCache: false,
@@ -2009,7 +2029,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		if (attrs.phash) {
 			// A failed repair must not swallow the error-ack status update below
 			try {
-				await retryGroupMessageAfterParticipantHashMismatch(key)
+				await retryGroupMessageAfterParticipantHashMismatch(key, attrs.phash)
 			} catch (error) {
 				logger.warn({ key, err: error }, 'participant-hash recovery failed')
 			}

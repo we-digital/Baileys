@@ -30,6 +30,7 @@ import {
 	getStatusCodeForMediaRetry,
 	getUrlFromDirectPath,
 	getWAUploadToServer,
+	groupParticipantHash,
 	MessageRetryManager,
 	normalizeMessageContent,
 	parseAndInjectE2ESessions,
@@ -113,6 +114,12 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		})
 	/** Serializes writes to userDevicesCache across USync refresh and device-notification handling. */
 	const devicesMutex = makeMutex()
+
+	/**
+	 * Participant-list hash (`phash`) sent with each group message, keyed by `group:msgId`.
+	 * The server answers with its own hash in the ack; recovery only runs when they differ.
+	 */
+	const sentGroupParticipantHashes = new NodeCache<string>({ stdTTL: 10 * 60, useClones: false })
 
 	// Initialize message retry manager if enabled
 	const messageRetryManager = enableRecentMessageCache ? new MessageRetryManager(logger, maxMsgRetryCount) : null
@@ -659,6 +666,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 	) => {
 		const meId = assertMeId(authState.creds)
 		const meLid = authState.creds.me?.lid
+		const isExactSenderDevice = (deviceJid: string) => deviceJid === meId || (!!meLid && deviceJid === meLid)
 		const isRetryResend = Boolean(participant?.jid)
 		let shouldIncludeDeviceIdentity = isRetryResend
 		const statusJid = 'status@broadcast'
@@ -775,7 +783,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				}
 
 				const additionalDevices = await getUSyncDevices(participantsList, !!useUserDevicesCache, false)
-				devices.push(...additionalDevices)
+				// Our exact sending device never gets a copy (same as the 1:1 path and whatsmeow)
+				devices.push(...additionalDevices.filter(d => !isExactSenderDevice(d.jid)))
 
 				if (isGroup) {
 					additionalAttributes = {
@@ -793,6 +802,16 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				reportingMessage = patched
 				const groupAddressingMode = additionalAttributes?.['addressing_mode'] || groupData?.addressingMode || 'lid'
 				const groupSenderIdentity = groupAddressingMode === 'lid' && meLid ? meLid : meId
+
+				if (isGroup) {
+					const phash = groupParticipantHash(
+						devices.map(d => d.jid),
+						groupSenderIdentity
+					)
+					additionalAttributes = { ...additionalAttributes, phash }
+					sentGroupParticipantHashes.set(`${destinationJid}:${msgId}`, phash)
+					logger.debug({ msgId, jid: destinationJid, phash, devices: devices.length }, 'group participant hash')
+				}
 
 				const { ciphertext, senderKeyDistributionMessage } = await signalRepository.encryptGroupMessage({
 					group: destinationJid,
@@ -912,8 +931,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				const { user: meLidUser } = meLid ? jidDecode(meLid)! : { user: null }
 
 				for (const { user, jid } of devices) {
-					const isExactSenderDevice = jid === meId || (meLid && jid === meLid)
-					if (isExactSenderDevice) {
+					if (isExactSenderDevice(jid)) {
 						logger.debug({ jid, meId, meLid }, 'Skipping exact sender device (whatsmeow pattern)')
 						continue
 					}
@@ -1309,6 +1327,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		createParticipantNodes,
 		getUSyncDevices,
 		messageRetryManager,
+		getSentGroupParticipantHash: (groupJid: string, msgId: string) =>
+			sentGroupParticipantHashes.get(`${groupJid}:${msgId}`),
 		updateMemberLabel,
 		updateMediaMessage: async (message: WAMessage) => {
 			const content = assertMediaContent(message.message)
