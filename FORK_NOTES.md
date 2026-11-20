@@ -81,6 +81,11 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
   about 50 minutes later, closes the stream with `<stream:error><ack class="status"/>`.
   On 2026-11-20 this reconnected ~18 of 26 production sessions every 50 minutes, the same
   status ids each time. Other ignored messages keep the NACK (`ignoredStanzaAckError`).
+- `<status from="status@broadcast">` stanzas (WhatsApp's status/story delivery, a tag of
+  its own, not `<message>`) get a plain ack (`class="status"`) from a `CB:status` handler.
+  Upstream has no handler for this tag, so nothing acked them and the server closed the
+  stream ~50 minutes later with `<stream:error><ack class="status"/>` (proved 11-20 by an
+  EVO stanza trace). Statuses are not decrypted or processed.
 
 ## Verification
 

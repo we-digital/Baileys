@@ -419,6 +419,32 @@ describe('buildAckStanza', () => {
 	})
 })
 
+describe('status stanza ack', () => {
+	it('acks a <status> stanza with class status, its id, type and participant, and no error', () => {
+		const node: BinaryNode = {
+			tag: 'status',
+			attrs: {
+				id: '3A264F9DC0AD4870805315CBEABC395E',
+				from: 'status@broadcast',
+				participant: '123@lid',
+				type: 'media',
+				offline: '0'
+			}
+		}
+		const ack = buildAckStanza(node, undefined, 'me@s.whatsapp.net')
+		expect(ack).toEqual({
+			tag: 'ack',
+			attrs: {
+				id: '3A264F9DC0AD4870805315CBEABC395E',
+				to: 'status@broadcast',
+				class: 'status',
+				participant: '123@lid',
+				type: 'media'
+			}
+		})
+	})
+})
+
 describe('ignoredStanzaAckError', () => {
 	it('positively acks an ignored status@broadcast message so the server stops redelivering it', () => {
 		const node: BinaryNode = {

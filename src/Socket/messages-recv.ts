@@ -2212,6 +2212,15 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	ws.on('CB:notification', async (node: BinaryNode) => {
 		await processNode('notification', node, 'handling notification', handleNotification)
 	})
+	// WhatsApp delivers status (story) updates as <status from="status@broadcast"> stanzas,
+	// not as <message>. Nothing else handles this tag, and without an ack the server closes
+	// the stream ~50 minutes later with <stream:error><ack class="status"/>, so every linked
+	// device reconnects on that cadence. Statuses are not processed here; a plain ack
+	// (class="status", same id/type/participant) tells the server the stanza arrived.
+	ws.on('CB:status', (node: BinaryNode) => {
+		sendMessageAck(node).catch(error => onUnexpectedError(error, 'acking status stanza'))
+	})
+
 	ws.on('CB:ack,class:message', (node: BinaryNode) => {
 		handleBadAck(node).catch(error => onUnexpectedError(error, 'handling bad ack'))
 	})
