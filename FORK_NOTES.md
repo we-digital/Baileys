@@ -76,6 +76,11 @@ after a participant changes phones, Signal identity, PN/LID mapping, or device l
   messages at all. `makeOfflineBatchPacer` asks for the next 100 once the previous batch is
   handled, or after a 3 s idle gap, stops at `<ib><offline/>`, on close, once the preview
   `count` has arrived, or after 3 requests that brought nothing.
+- An ignored `status@broadcast` message (`shouldIgnoreJid`) gets a plain ACK, not the
+  500 NACK upstream sends for every ignored message. WhatsApp redelivers a NACKed status and,
+  about 50 minutes later, closes the stream with `<stream:error><ack class="status"/>`.
+  On 2026-11-20 this reconnected ~18 of 26 production sessions every 50 minutes, the same
+  status ids each time. Other ignored messages keep the NACK (`ignoredStanzaAckError`).
 
 ## Verification
 

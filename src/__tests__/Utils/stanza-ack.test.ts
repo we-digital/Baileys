@@ -1,4 +1,4 @@
-import { buildAckStanza } from '../../Utils/stanza-ack'
+import { buildAckStanza, ignoredStanzaAckError } from '../../Utils/stanza-ack'
 import { type BinaryNode } from '../../WABinary'
 
 describe('buildAckStanza', () => {
@@ -416,5 +416,27 @@ describe('buildAckStanza', () => {
 				}
 			})
 		})
+	})
+})
+
+describe('ignoredStanzaAckError', () => {
+	it('positively acks an ignored status@broadcast message so the server stops redelivering it', () => {
+		const node: BinaryNode = {
+			tag: 'message',
+			attrs: { id: '3A46878677204A09B8CC', from: 'status@broadcast', participant: '123@lid', type: 'media' }
+		}
+		const ack = buildAckStanza(node, ignoredStanzaAckError('message', node.attrs.from, 500), 'me@s.whatsapp.net')
+		expect(ack.attrs.error).toBeUndefined()
+		expect(ack.attrs.class).toBe('message')
+	})
+
+	it('still nacks other ignored messages', () => {
+		expect(ignoredStanzaAckError('message', '123@newsletter', 500)).toBe(500)
+		expect(ignoredStanzaAckError('message', '123@g.us', 500)).toBe(500)
+	})
+
+	it('never adds an error to receipts, notifications or calls', () => {
+		expect(ignoredStanzaAckError('receipt', 'status@broadcast', 500)).toBeUndefined()
+		expect(ignoredStanzaAckError('notification', '123@g.us', 500)).toBeUndefined()
 	})
 })

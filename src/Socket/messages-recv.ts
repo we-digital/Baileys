@@ -60,7 +60,7 @@ import { emitLidPnMappings, getLidPnMappingFromAlt } from '../Utils/lid-mapping-
 import { makeMutex } from '../Utils/make-mutex'
 import { makeOfflineBatchPacer } from '../Utils/offline-batch-pacer'
 import { makeOfflineNodeProcessor, type MessageType } from '../Utils/offline-node-processor'
-import { buildAckStanza } from '../Utils/stanza-ack'
+import { buildAckStanza, ignoredStanzaAckError } from '../Utils/stanza-ack'
 import {
 	buildMergedTcTokenIndexWrite,
 	isTcTokenExpired,
@@ -2181,7 +2181,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 
 		if (ignoreJid && ignoreJid !== S_WHATSAPP_NET && shouldIgnoreJid(ignoreJid)) {
-			await sendMessageAck(node, type === 'message' ? NACK_REASONS.UnhandledError : undefined)
+			await sendMessageAck(node, ignoredStanzaAckError(type, from, NACK_REASONS.UnhandledError))
 			if (isOffline) {
 				offlineBatchPacer.onHandled()
 			}
